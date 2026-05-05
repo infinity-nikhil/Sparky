@@ -33,3 +33,8 @@ export const connectwallet = async (req, res) => {
         res.status(500).json({ message: "internal server error"});
     }
 }
+
+export const disconnectWallet = async (_, res) => {
+    res.cookie("jwt","", {maxAge:0})
+    res.status(200).json({ message: "Logout was success"})
+}

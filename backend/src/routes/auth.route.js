@@ -1,13 +1,11 @@
 import express from "express";
-import { connectwallet } from "../controller/auth.controller.js";
+import { connectwallet, disconnectWallet } from "../controller/auth.controller.js";
 
 const router = express.Router();
 
 router.post("/connectWallet", connectwallet);
 
-router.get("/disconnect-wallet", (req,res) => {
-    res.send("disconnect wallet comming soon")
-})
+router.post("/disconnectWallet", disconnectWallet);
 
 
 export default router;
