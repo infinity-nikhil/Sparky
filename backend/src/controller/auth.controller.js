@@ -17,7 +17,7 @@ export const connectwallet = async (req, res) => {
             generateToken(savedUser._id, res);
 
             res.status(201).json({
-                _id: newUser._id,
+                _id: savedUser._id,
                 walletAddress: savedUser.walletAddress,
             })
         } else {

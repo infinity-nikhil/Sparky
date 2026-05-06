@@ -2,65 +2,87 @@ import { VersionedTransaction, Connection, Keypair } from "@solana/web3.js";
 import { z } from "zod";
 import "dotenv/config";
 import bs58 from "bs58";
-import multer from "multer"; // Handles multipart/form-data from the frontend
+import multer from "multer";
+import cloudinary from "../lib/cloudinary.js";
+import Agent from "../models/Agent.js";
 
-// Store file in memory as a buffer instead of saving to disk
+// ─────────────────────────────────────────────
+// Multer — store uploaded file in memory buffer
+// ─────────────────────────────────────────────
 const upload = multer({ storage: multer.memoryStorage() });
 export const uploadMiddleware = upload.single("image"); // "image" = field name from frontend
 
+// ─────────────────────────────────────────────
+// Zod schema — validates incoming request body
+// ─────────────────────────────────────────────
 const agentDetailsSchema = z.object({
-    name: z.string(),
-    symbol: z.string(),
-    initialBuyAmount: z.number(),
-    description: z.string(),
-    twitter: z.string(),
-    telegram: z.string(),
-    website: z.string(),
-    personality: z.string(),
-    // NOTE: "image" is no longer in the schema — it comes via req.file (multer), not req.body
+    name:              z.string().min(1),
+    symbol:            z.string().optional().default(""),
+    initialBuyAmount:  z.number().optional().default(0),
+    description:       z.string().min(1),
+    twitter:           z.string().optional().default(""),
+    telegram:          z.string().optional().default(""),
+    website:           z.string().optional().default(""),   // fixed: .optional() not .optional
+    personality:       z.string().min(1),
+    // NOTE: "image" is NOT in the schema — it arrives via req.file (multer), not req.body
 });
 
-const RPC_ENDPOINT = "https://api.mainnet-beta.solana.com";
+// ─────────────────────────────────────────────
+// Solana RPC connection
+// ─────────────────────────────────────────────
+const RPC_ENDPOINT  = "https://api.mainnet-beta.solana.com";
 const web3Connection = new Connection(RPC_ENDPOINT, "confirmed");
 
+// ─────────────────────────────────────────────
+// Main controller
+// ─────────────────────────────────────────────
 export const createToken = async (req, res) => {
     try {
-        // "image" field is now in req.file, all other fields in req.body
+
+        // ── 1. Validate image upload ──────────────────────────────────────
         if (!req.file) {
             return res.status(400).json({ error: "Image file is required" });
         }
 
+        // Convert multer buffer to base64 data URI for Cloudinary
+        const agentImage = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+
+        // ── 2. Validate and parse request body ───────────────────────────
         const parsedData = agentDetailsSchema.parse({
             ...req.body,
-            initialBuyAmount: Number(req.body.initialBuyAmount), // body fields are strings, coerce to number
+            initialBuyAmount: Number(req.body.initialBuyAmount), // body values are strings, coerce to number
         });
 
+        // ── 3. Check for duplicate agent name ────────────────────────────
+        const existingAgent = await Agent.findOne({ name: parsedData.name });
+        if (existingAgent) {
+            return res.status(400).json({ message: "An agent with this name already exists, please try another." });
+        }
+
+        // ── 4. Load private key from environment ─────────────────────────
         const secretKey = process.env.PRIVATE_KEYPAIR;
         if (!secretKey) {
             return res.status(500).json({ error: "Missing PRIVATE_KEYPAIR environment variable" });
         }
 
         const signerKeyPair = Keypair.fromSecretKey(bs58.decode(secretKey));
-        const mintKeypair = Keypair.generate();
+        const mintKeypair   = Keypair.generate();
 
-        // Prepare metadata upload
+        // ── 5. Build metadata form and upload to IPFS via pump.fun ───────
         const FormData = (await import("form-data")).default;
-        const formData = new FormData();
+        const formData  = new FormData();
 
-        // Use the buffer from multer directly — no filesystem needed
         formData.append("file", req.file.buffer, {
-            filename: req.file.originalname,
+            filename:    req.file.originalname,
             contentType: req.file.mimetype,
         });
-        formData.append("name", parsedData.name);
-        formData.append("symbol", parsedData.symbol);
-
-        const modifiedDescription = `${parsedData.description}\n\nPowered by Sparky`;
-        formData.append("description", modifiedDescription);
+        formData.append("name",        parsedData.name);
+        formData.append("symbol",      parsedData.symbol);
+        formData.append("description", `${parsedData.description}\n\nPowered by Sparky`);
 
         const metadataResponse = await fetch("https://pump.fun/api/ipfs", {
-            method: "POST",
-            body: formData,
+            method:  "POST",
+            body:    formData,
             headers: formData.getHeaders(),
         });
 
@@ -68,44 +90,65 @@ export const createToken = async (req, res) => {
             throw new Error(`Failed to upload metadata: ${metadataResponse.statusText}`);
         }
 
-        const metadataResponseJSON = await metadataResponse.json();
+        const metadataJSON = await metadataResponse.json();
 
-        const response = await fetch("https://pumpportal.fun/api/trade-local", {
-            method: "POST",
+        // ── 6. Request signed transaction from PumpPortal ─────────────────
+        const tradeResponse = await fetch("https://pumpportal.fun/api/trade-local", {
+            method:  "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                publicKey: signerKeyPair.publicKey.toBase58(),
-                action: "create",
+                publicKey:      signerKeyPair.publicKey.toBase58(),
+                action:         "create",
                 tokenMetadata: {
-                    name: metadataResponseJSON.metadata.name,
-                    symbol: metadataResponseJSON.metadata.symbol,
-                    uri: metadataResponseJSON.metadataUri,
+                    name:   metadataJSON.metadata.name,
+                    symbol: metadataJSON.metadata.symbol,
+                    uri:    metadataJSON.metadataUri,
                 },
-                mint: mintKeypair.publicKey.toBase58(),
-                denominatedInSol: "true",
-                amount: parsedData.initialBuyAmount,
-                slippage: 10,
-                priorityFee: 0.0005,
-                pool: "pump",
+                mint:              mintKeypair.publicKey.toBase58(),
+                denominatedInSol:  "true",
+                amount:            parsedData.initialBuyAmount,
+                slippage:          10,
+                priorityFee:       0.0005,
+                pool:              "pump",
             }),
         });
 
-        if (response.ok) {
-            const data = await response.arrayBuffer();
-            const tx = VersionedTransaction.deserialize(new Uint8Array(data));
-            tx.sign([mintKeypair, signerKeyPair]);
-            const signature = await web3Connection.sendTransaction(tx);
-
-            console.log(`Transaction successful: https://solscan.io/tx/${signature}`);
-            return res.status(200).json({
-                success: true,
-                signature,
-                explorerUrl: `https://solscan.io/tx/${signature}`,
-            });
-        } else {
-            const errorText = await response.text();
+        if (!tradeResponse.ok) {
+            const errorText = await tradeResponse.text();
             throw new Error(`Trade API error: ${errorText}`);
         }
+
+        // ── 7. Deserialize, sign and broadcast transaction ────────────────
+        const txData    = await tradeResponse.arrayBuffer();
+        const tx        = VersionedTransaction.deserialize(new Uint8Array(txData));
+        tx.sign([mintKeypair, signerKeyPair]);
+        const signature = await web3Connection.sendTransaction(tx);
+
+        console.log(`Transaction successful: https://solscan.io/tx/${signature}`);
+
+        // ── 8. Only persist agent AFTER the transaction is confirmed ──────
+        const newAgent   = new Agent({ ...parsedData });
+        const savedAgent = await newAgent.save();
+
+        // ── 9. Upload image to Cloudinary and update agent record ─────────
+        const uploadResponse = await cloudinary.uploader.upload(agentImage);
+
+        const updatedAgent = await Agent.findByIdAndUpdate(
+            savedAgent._id,
+            { image: uploadResponse.secure_url },
+            { new: true }
+        );
+
+        // ── 10. Return success response ───────────────────────────────────
+        return res.status(200).json({
+            success:          true,
+            signature,
+            explorerUrl:      `https://solscan.io/tx/${signature}`,
+            agentId:          updatedAgent._id,
+            agentName:        updatedAgent.name,
+            agentPersonality: updatedAgent.personality,
+            agentImage:       updatedAgent.image,
+        });
 
     } catch (error) {
         console.error("createToken error:", error);
