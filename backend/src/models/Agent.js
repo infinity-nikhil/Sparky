@@ -10,7 +10,6 @@ const agentSchema = new Schema(
         },
         symbol: {
             type: String,
-            required: true
         },
         description: {
             type: String,
@@ -25,7 +24,7 @@ const agentSchema = new Schema(
             unique: true
         },
         website: {
-            type: true,
+            type: String,
             unique: true
         },
         personality: {
